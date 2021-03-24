@@ -9,5 +9,5 @@ export type Task = {
   id: string;
   text: number;
   status?: string;
-  count?: number;
+  count: number;
 }

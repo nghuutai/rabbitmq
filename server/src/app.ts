@@ -15,7 +15,7 @@ const io = new Server(server, {
 }});
 
 const executeApp = () => {
-  io.on('connection', AppController.onConnection);
+  io.on('connection', (socket) => AppController.onConnection(socket));
   server.listen(config.port, () => console.log(`🌼 Listening on port ${config.port}`));
 };
 

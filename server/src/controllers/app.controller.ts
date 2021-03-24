@@ -1,9 +1,10 @@
 import { Socket } from 'socket.io';
-
+import { Message } from 'amqplib';
 import { logger } from 'juno-js';
 import {
   config, RabbitMQ, EVENT, TASK_STATUS, RABBITMQ_CONNECTION_STRING, QUEUE,
 } from '../components';
+import { io } from '../app';
 import { CustomerServiceUser, Task } from '../types/app.type';
 
 class AppController {
@@ -11,44 +12,42 @@ class AppController {
   private static mapId: Map<string, string> = new Map();
 
   static onConnection(socket: Socket) {
-    socket.on(EVENT.userConnection,(user: CustomerServiceUser, socket: Socket) => AppController.onUserConnection(user, socket));
-    socket.on(EVENT.taskHandler, (user: CustomerServiceUser, result: Task) => AppController.onTaskHandler(user, result, socket));
-    socket.on(EVENT.userDisconnection,(() => AppController.onUserDisconnection(socket)));
-    socket.on(EVENT.userCloseTab, AppController.onUserCloseTab);
+    socket.on(EVENT.userConnection,(user: CustomerServiceUser, socket: Socket) => this.onUserConnection(user, socket));
+    socket.on(EVENT.taskHandler, (user: CustomerServiceUser, result: Task) => this.onTaskHandler(user, result, socket));
+    socket.on(EVENT.userDisconnection,(() => this.onUserDisconnection(socket)));
+    socket.on(EVENT.userCloseTab, this.onUserCloseTab);
+    socket.on('abc', (user: any, result: any) => { console.log('data', user, result); })
   }
 
   private static onUserConnection(user: CustomerServiceUser, socket: Socket) {
-    AppController.customerServiceUsers.push(user);
-    AppController.mapId.set(user.socketId, user.id!);
+    this.customerServiceUsers.push(user);
+    this.mapId.set(user.socketId, user.id!);
     console.log('----------Connection-------------------');
-    console.log(AppController.customerServiceUsers);
-    AppController.onSubscriber(socket);
+    console.log(this.customerServiceUsers);
+    this.onSubscriber(socket);
   }
 
   private static onUserDisconnection(socket: Socket) {
-    AppController.customerServiceUsers = AppController.customerServiceUsers.filter(user => user.id !== AppController.mapId.get(socket.id));
-    AppController.mapId.delete(socket.id);
+    this.customerServiceUsers = this.customerServiceUsers.filter(user => user.id !== this.mapId.get(socket.id));
+    this.mapId.delete(socket.id);
     console.log('----------------Disconnect------------------');
-    console.log(AppController.customerServiceUsers);
+    console.log(this.customerServiceUsers);
   }
 
   private static async onTaskHandler(user: CustomerServiceUser, result: Task, socket: Socket) {
     const rabbitMQ = new RabbitMQ(RABBITMQ_CONNECTION_STRING);
     await rabbitMQ.start();
-    AppController.customerServiceUsers = AppController.changeStatusUser(AppController.customerServiceUsers, user);
-    if (result.status === 'faile') {
-      let priority = result?.count! + 1;
-      const dataRetry = {
-          ...result,
-          text: Math.floor(Math.random() * Math.floor(10)),
-      };
-      await rabbitMQ.publishInQueue(QUEUE.newTask, Buffer.from(JSON.stringify(dataRetry)), priority)
-      await rabbitMQ.consume(QUEUE.newTask);
+    this.customerServiceUsers = this.changeStatusUser(this.customerServiceUsers, user);
+    if (result.status === 'timeout' || result.status === 'faile') {
+      let priority = result?.count + 1;
+      console.log('-----retry-----', result);
+      await rabbitMQ.publishInQueue(QUEUE.newTask, Buffer.from(JSON.stringify(result)), priority)
+      await rabbitMQ.consume(QUEUE.newTask, this.assignTask);
     } else {
       const queueInfo = await rabbitMQ.getQueueInfo();
       // if queue have message or have CS available then create consume to get message
-      if (queueInfo.messageCount > 0 || AppController.haveUserConnect(AppController.customerServiceUsers)) {
-        AppController.onSubscriber(socket);
+      if (queueInfo.messageCount > 0 || this.haveUserConnect(this.customerServiceUsers)) {
+        this.onSubscriber(socket);
       } else {
         console.log('Task Done');
       }
@@ -58,7 +57,7 @@ class AppController {
   private static async onUserCloseTab(user: CustomerServiceUser, result: Task) {
     const rabbitMQ = new RabbitMQ(RABBITMQ_CONNECTION_STRING);
     await rabbitMQ.start();
-    let priority = result.count! + 1;
+    let priority = result.count + 1;
     await rabbitMQ.publishInQueue(QUEUE.newTask, Buffer.from(JSON.stringify(result)), priority);
   }
 
@@ -71,8 +70,22 @@ class AppController {
         await rabbitMQ.closeChannel();
       });
     }
-    const message = await rabbitMQ.consume(QUEUE.newTask);
+    const message = await rabbitMQ.consume(QUEUE.newTask, this.assignTask);
     logger.info(message.content.toString(), '------------message');
+  }
+
+  public static async assignTask(message: Message, rabbit: RabbitMQ) {
+    const randomSocketId = AppController.randomId(AppController.getCustomerServiceUsers());
+      let users = AppController.getCustomerServiceUsers();
+      const userId = AppController.getMapId().get(randomSocketId) || '';
+      if(AppController.checkAssign(users, userId)) {
+        const content = JSON.parse(message.content.toString());
+        io.to(randomSocketId).emit(EVENT.taskAssignment, content);
+        users = AppController.changeStatusUser(users, { socketId: randomSocketId, status: 'inprocess' })
+        AppController.setCustomerServiceUsers(users);
+        rabbit.ack(message);
+        rabbit.closeChannel();
+      }
   }
 
   public static randomId(customerServiceUsers: CustomerServiceUser[]): string {
@@ -88,7 +101,7 @@ class AppController {
 
   public static changeStatusUser (customerServiceUsers: CustomerServiceUser[], data: CustomerServiceUser): CustomerServiceUser[] {
     return customerServiceUsers.map(user => {
-        if (user.id === AppController.mapId.get(data.socketId)) {
+        if (user.id === this.mapId.get(data.socketId)) {
             user = {
                 ...user,
                 status: data.status,
@@ -104,19 +117,19 @@ class AppController {
   }
 
   public static getCustomerServiceUsers(): CustomerServiceUser[] {
-    return AppController.customerServiceUsers;
+    return this.customerServiceUsers;
   }
 
   public static setCustomerServiceUsers(customerServiceUsers: CustomerServiceUser[]) {
-    AppController.customerServiceUsers = customerServiceUsers;
+    this.customerServiceUsers = customerServiceUsers;
   }
 
   public static getMapId(): Map<string, string> {
-    return AppController.mapId;
+    return this.mapId;
   }
 
   public static setMapId(mapId: Map<string, string>) {
-    AppController.mapId = mapId;
+    this.mapId = mapId;
   }
 }
 

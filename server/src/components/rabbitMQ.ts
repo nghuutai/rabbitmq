@@ -7,6 +7,7 @@ import {
 import { QUEUE, EVENT } from './constants';
 import { io } from '../app';
 import { AppController } from '../controllers/app.controller';
+import { callbackify } from 'util';
 
 class RabbitMQ {
   private conn: Connection;
@@ -39,21 +40,11 @@ class RabbitMQ {
     return this.channel.publish(exchange, routingKey, Buffer.from(message));
   }
 
-  async consume(queue: string): Promise<Message> {
+  async consume(queue: string, callback: any): Promise<Message> {
     return new Promise<Message>(((resolve) => {
       this.channel.consume(queue, async (message: any) => {
-        const randomSocketId = AppController.randomId(AppController.getCustomerServiceUsers());
-        let users = AppController.getCustomerServiceUsers();
-        const userId = AppController.getMapId().get(randomSocketId) || '';
-        if(AppController.checkAssign(users, userId)) {
-          const content = JSON.parse(message.content.toString());
-          io.to(randomSocketId).emit(EVENT.taskAssignment, content);
-          resolve(message);
-          users = AppController.changeStatusUser(users, { socketId: randomSocketId, status: 'inprocess' })
-          AppController.setCustomerServiceUsers(users);
-          this.channel.ack(message);
-          this.closeChannel();
-        }
+        callback(message, this);
+        resolve(message);
       }, {
         noAck: false,
       });
@@ -67,6 +58,10 @@ class RabbitMQ {
   async closeChannel() {
     await this.channel.close();
   }
-}
 
+  async ack(message: Message) {
+    await this.channel.ack(message);
+  }
+}
+ 
 export { RabbitMQ };
